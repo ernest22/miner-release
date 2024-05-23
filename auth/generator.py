@@ -36,7 +36,7 @@ class WalletGenerator:
             table.add_row([key, value])
         print(table)
         print("Make sure you back up the identity wallet file. One identity wallet is bound to one miner address receiving rewards. The identity wallet is used for authentication only. DO NOT deposit funds into the identity wallet.\n")
-        while True:
+        while False:
             confirmation = input("Please confirm you have noted down the Identity Wallet Seed Phrase and Identity Wallet Address safely. This will be required for accessing your account and all your rewards.\nPlease type 'yes' (or 'y') to confirm that you have safely backed up the details shown: ")
             if confirmation.lower() in ['yes', 'y']:
                 print("Confirmation received. Thank you for safely backing up your identity wallet details.")
