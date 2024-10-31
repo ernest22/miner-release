@@ -6,8 +6,7 @@ import subprocess
 from openai import OpenAI
 
 class LLMServerConfig:
-    MAX_MODEL_LEN = 4096
-    CHAT_TEMPLATE = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"
+    MAX_MODEL_LEN = 8192
 
     def __init__(self, base_config):
         self.base_config = base_config
@@ -19,6 +18,7 @@ class LLMServerConfig:
         self.served_model_name = sys.argv[3]  # Served model name from the third argument
         self.gpu_memory_util  = sys.argv[4] # GPU memory utilization ratio for vllm
         self.model_revision = None if len(sys.argv) <= 5 or sys.argv[5] == 'None' else sys.argv[5]  # Model revision from the fourth argument, if present
+        self.tool_call_parser = None if len(sys.argv) <= 10 or sys.argv[10] == 'None' else sys.argv[10]
         self.process = None
     
     def initialize_client(self):
@@ -33,15 +33,16 @@ class LLMServerConfig:
             "--model", self.model_id,
             "--served-model-name", self.served_model_name,
             "--max-model-len", str(self.MAX_MODEL_LEN),
-            "--chat-template", self.CHAT_TEMPLATE,
             "--uvicorn-log-level", "warning",
             "--disable-log-requests",
             "--dtype", "half",
             "--port", str(self.base_config.port),
             "--tensor-parallel-size",str(self.num_gpus),
-            "--gpu-memory-utilization", self.gpu_memory_util
+            "--gpu-memory-utilization", self.gpu_memory_util,
         ]
 
+        if self.tool_call_parser:
+            cmd.extend(["--tool-call-parser", self.tool_call_parser, "--enable-auto-tool-choice"])
         if self.model_revision:
             cmd.extend(["--revision", self.model_revision])
         if self.model_quantization:

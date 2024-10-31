@@ -102,61 +102,19 @@ setup_venv_environment() {
     log_info "Virtual environment activated."
 }
 
-setup_conda_environment() {
-    log_info "Updating package lists..."
-    sudo apt-get update -qq >/dev/null 2>&1
-
-    if [ -d "$HOME/miniconda" ]; then
-        log_info "Miniconda already installed at $HOME/miniconda. Proceed to create a conda environment."
-    else
-        log_info "Installing Miniconda..."
-        wget --quiet --show-progress --progress=bar:force:noscroll https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh
-        bash ~/miniconda.sh -b -p $HOME/miniconda
-        export PATH="$HOME/miniconda/bin:$PATH"
-        rm ~/miniconda.sh
-    fi
-
-    # Ensure Conda is correctly initialized
-    source ~/miniconda/bin/activate
-    ~/miniconda/bin/conda init bash >/dev/null 2>&1
-
-    # Source .bashrc to update the path for conda, if it exists
-    if [ -f "$HOME/.bashrc" ]; then
-        log_info "Sourcing .bashrc to update the path for conda"
-        source "$HOME/.bashrc"
-    elif [ -f "$HOME/.bash_profile" ]; then
-        # Fallback for systems that use .bash_profile instead of .bashrc
-        log_info "Sourcing .bash_profile to update the path for conda"
-        source "$HOME/.bash_profile"
-    else
-        log_error "Could not find a .bashrc or .bash_profile file to source."
-    fi
-
-    # Check if the Conda environment already exists
-    if conda info --envs | grep 'llm-venv' > /dev/null; then
-        log_info "Conda environment 'llm-venv' already exists. Skipping creation."
-    else
-        log_info "Creating a virtual environment with Miniconda..."
-        # Suppressing the output completely, consider logging at least errors
-        conda create -n llm-venv python=3.11 -y --quiet >/dev/null 2>&1
-        log_info "Conda virtual environment 'llm-venv' created."
-    fi
-
-    conda activate llm-venv
-    log_info "Conda virtual environment 'llm-venv' activated."
-}
-
 install_with_spinner() {
     local dep=$1
+    local log_file="/tmp/pip_install_log_${dep// /_}.txt"
+    local status_file="/tmp/install_exit_status_${dep// /_}.tmp"
+
     (
-        pip install "$dep" > /dev/null 2>&1
-        echo $? > /tmp/install_exit_status.tmp
+        pip install "$dep" > "$log_file" 2>&1
+        echo $? > "$status_file"
     ) &
 
     pid=$! # PID of the pip install process
     spinner="/-\|"
 
-    # Use printf for consistent formatting
     printf "Installing %-20s" "$dep..."
 
     while kill -0 $pid 2> /dev/null; do
@@ -167,21 +125,105 @@ install_with_spinner() {
     done
 
     wait $pid
-    exit_status=$(cat /tmp/install_exit_status.tmp)
-    rm /tmp/install_exit_status.tmp
 
-    if [ $exit_status -eq 0 ]; then
+    if [ -f "$status_file" ]; then
+        exit_status=$(cat "$status_file")
+        rm -f "$status_file"
+    else
+        exit_status=1
+        echo "Warning: Status file not found. Assuming installation failed."
+    fi
+
+    if [ "$exit_status" -eq 0 ]; then
         printf "\b Done.\n"
     else
         printf "\b Failed.\n"
-        return 1
+        echo "Installation of $dep failed. Error details:"
+        [ -f "$log_file" ] && cat "$log_file"
+    fi
+
+    # Remove log file if it exists
+    [ -f "$log_file" ] && rm -f "$log_file"
+
+    return "$exit_status"
+}
+
+setup_conda_environment() {
+    log_info "Updating package lists..."
+    sudo apt-get update -qq >/dev/null 2>&1
+
+    if [ -d "$HOME/miniconda" ]; then
+        log_info "Miniconda already installed at $HOME/miniconda. Proceeding to create/update conda environment."
+    else
+        log_info "Installing Miniconda..."
+        wget --quiet --show-progress --progress=bar:force:noscroll https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh
+        bash ~/miniconda.sh -b -p $HOME/miniconda
+        export PATH="$HOME/miniconda/bin:$PATH"
+        rm ~/miniconda.sh
+    fi
+
+    # Ensure Conda is correctly initialized
+    source $HOME/miniconda/bin/activate
+    $HOME/miniconda/bin/conda init bash >/dev/null 2>&1
+
+    # Source .bashrc to update the path for conda, if it exists
+    if [ -f "$HOME/.bashrc" ]; then
+        log_info "Sourcing .bashrc to update the path for conda"
+        source "$HOME/.bashrc"
+    elif [ -f "$HOME/.bash_profile" ]; then
+        log_info "Sourcing .bash_profile to update the path for conda"
+        source "$HOME/.bash_profile"
+    else
+        log_error "Could not find a .bashrc or .bash_profile file to source."
+    fi
+
+    # Check if the Conda environment already exists
+    if conda env list | grep -q "$HOME/miniconda/envs/llm-venv"; then
+        log_info "Conda environment 'llm-venv' exists. Checking if it's valid..."
+        if conda run -n llm-venv python --version >/dev/null 2>&1; then
+            log_info "Conda environment 'llm-venv' is valid. Activating..."
+        else
+            log_warning "Conda environment 'llm-venv' exists but appears to be invalid. Removing and recreating..."
+            conda env remove -n llm-venv -y
+            conda create -n llm-venv python=3.11 -y --quiet
+        fi
+    else
+        log_info "Creating a new conda environment 'llm-venv'..."
+        conda create -n llm-venv python=3.11 -y --quiet
+    fi
+
+    # Activate the environment
+    conda activate llm-venv
+    if [ $? -ne 0 ]; then
+        log_error "Failed to activate Conda environment. Please check your Conda installation."
+        exit 1
+    fi
+    log_info "Conda virtual environment 'llm-venv' activated."
+
+    # Ensure pip is installed in the environment
+    if ! command -v pip &> /dev/null; then
+        log_info "Installing pip in the Conda environment..."
+        conda install pip -y
+        if [ $? -ne 0 ]; then
+            log_error "Failed to install pip. Please check your Conda installation."
+            exit 1
+        fi
     fi
 }
 
-# Example usage for your dependency installation function
 install_dependencies() {
     log_info "Installing Python dependencies..."
-    local dependencies=("vllm" "python-dotenv" "toml" "openai" "triton==2.1.0" "wheel" "packaging" "psutil" "web3" "mnemonic" "prettytable")
+    local dependencies=("vllm >= 0.6.3" "python-dotenv" "toml" "openai >= 1.40.0" "triton" "wheel" "packaging" "psutil" "web3" "mnemonic" "prettytable" "ray")
+
+    # Ensure Conda environment is activated
+    if [ -z "$CONDA_PREFIX" ]; then
+        log_error "Conda environment is not activated. Attempting to activate..."
+        conda activate llm-venv
+        if [ $? -ne 0 ]; then
+            log_error "Failed to activate Conda environment. Please check your Conda installation."
+            exit 1
+        fi
+    fi
 
     for dep in "${dependencies[@]}"; do
         if ! install_with_spinner "$dep"; then
@@ -215,10 +257,11 @@ fetchModelDetails() {
     local quantization=$(echo "$model_found" | jq -r '.type' | grep -q '16b' && echo "None" || echo "gptq")
     local hf_model_id=$(echo "$model_found" | jq -r '.hf_id')
     local revision=$(echo "$model_found" | jq -r '.hf_branch // "None"')
+    local tool_call_parser=$(echo "$model_found" | jq -r '.tool_call_parser // "None"')
 
-    log_info "Model details: HF_ID=$hf_model_id, Size_GB=$size_gb, Quantization=$quantization, Revision=$revision"
+    log_info "Model details: HF_ID=$hf_model_id, Size_GB=$size_gb, Quantization=$quantization, Revision=$revision, Tool Call Parser=$tool_call_parser"
     # Echoing the details for capture by the caller
-    echo "$size_gb $quantization $hf_model_id $revision"
+    echo "$size_gb $quantization $hf_model_id $revision $tool_call_parser"
 }
 
 validateMinerId() {
@@ -259,37 +302,40 @@ validateVram() {
         exit 1
     fi
 
-    # Fetch the available VRAM in MB
-    local available_mb=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits | awk -v gpu_id="$gpu_ids" 'NR==gpu_id+1{print $1}')
+    # Initialize total available VRAM
+    local total_available_mb=0
+    # Iterate over each GPU ID
+    IFS=',' read -ra gpu_id_array <<< "$gpu_ids"
+    for gpu_id in "${gpu_id_array[@]}"; do
+        # Fetch the available VRAM in MB for each GPU
+        local available_mb=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits --id="$gpu_id")
 
-    if [ -z "$available_mb" ]; then
-        log_error "Failed to fetch available VRAM."
+        if [ -z "$available_mb" ]; then
+            log_error "Failed to fetch available VRAM for GPU $gpu_id."
+            exit 1
+        fi
+
+        # Add the available VRAM to the total
+        total_available_mb=$((total_available_mb + available_mb))
+    done
+
+    log_info "Total available VRAM: ${total_available_mb}MB, Required VRAM: ${required_mb}MB"
+
+    # Compare total available VRAM and required VRAM
+    if [ "$total_available_mb" -lt "$required_mb" ]; then
+        log_error "Insufficient VRAM. Total available: ${total_available_mb}MB, Required: ${required_mb}MB."
         exit 1
-    fi
-
-    log_info "Available VRAM: ${available_mb}MB, Required VRAM: ${required_mb}MB"
-
-    # Compare available and required VRAM
-    if [ "$available_mb" -lt "$required_mb" ]; then
-        log_error "Insufficient VRAM. Available: ${available_mb}MB, Required: ${required_mb}MB."
-        exit 1
-    else
-        log_info "Sufficient VRAM available. Proceeding..."
     fi
 
     # Determine GPU memory utilization based on model name and available VRAM
-    if [[ "$heurist_model_id" == *"mixtral-8x7b-gptq"* ]] && [ "$available_mb" -gt 32000 ]; then
-        local gpu_memory_util=$(echo "scale=2; (32000-1000)/$available_mb" | bc)
-    elif [[ "$heurist_model_id" == *"yi-34b-gptq"* ]] && [ "$available_mb" -gt 40000 ]; then
-        local gpu_memory_util=$(echo "scale=2; (40000-1000)/$available_mb" | bc)
-    elif [[ "$heurist_model_id" == *"70b"* ]] && [ "$available_mb" -gt 44000 ]; then
-        local gpu_memory_util=$(echo "scale=2; (44000-1000)/$available_mb" | bc)
-    elif [[ "$heurist_model_id" == *"8b"* ]] && [ "$available_mb" -gt 18500 ]; then
-        local gpu_memory_util=$(echo "scale=2; (18500-1000)/$available_mb" | bc)
-    elif [[ "$heurist_model_id" == *"pro-mistral-7b"* ]] && [ "$available_mb" -gt 18000 ]; then
-        local gpu_memory_util=$(echo "scale=2; (18000-1000)/$available_mb" | bc)
+    if [[ "$heurist_model_id" == *"mixtral-8x7b-gptq"* ]] && [ "$total_available_mb" -gt 35000 ]; then
+        local gpu_memory_util=$(echo "scale=2; (35000-1000)/$total_available_mb" | bc)
+    elif [[ "$heurist_model_id" == *"70b"* ]] && [ "$total_available_mb" -gt 44000 ]; then
+        local gpu_memory_util=$(echo "scale=2; (44000-1000)/$total_available_mb" | bc)
+    elif [[ "$heurist_model_id" == *"8b"* ]] && [ "$total_available_mb" -gt 21000 ]; then
+        local gpu_memory_util=$(echo "scale=2; (21000-1000)/$total_available_mb" | bc)
     else
-        local gpu_memory_util=$(echo "scale=2; (12000-1000)/$available_mb" | bc) # Default value or handle other cases as needed
+        local gpu_memory_util=$(echo "scale=2; (12000-1000)/$total_available_mb" | bc) # Default value or handle other cases as needed
     fi
 
     # Output the gpu_memory_util value
@@ -324,7 +370,7 @@ main() {
 
     # Fetch model details including the model ID, required VRAM size, quantization method, and model name
     heurist_model_id=$(getModelId "$1") || exit 1
-    read -r size_gb quantization hf_model_id revision < <(fetchModelDetails "$heurist_model_id")
+    read -r size_gb quantization hf_model_id revision tool_call_parser < <(fetchModelDetails "$heurist_model_id")
 
     shift 1
     # Parse additional arguments
@@ -370,13 +416,13 @@ main() {
     log_info "GPU Memory Utilization ratio for vllm: $gpu_memory_util"
 
     # Assuming all validations passed, proceed to execute the Python script with the model details
-    log_info "Executing Python script with Heurist model ID: $heurist_model_id, Quantization: $quantization, HuggingFace model ID: $hf_model_id, Revision: $revision, Miner ID Index: $miner_id_index, Port: $port, GPU IDs: $gpu_ids"
-    local python_script=$(ls llm-miner-*.py | head -n 1)
+    log_info "Executing Python script with Heurist model ID: $heurist_model_id, Quantization: $quantization, HuggingFace model ID: $hf_model_id, Revision: $revision, Tool Call Parser: $tool_call_parser, Miner ID Index: $miner_id_index, Port: $port, GPU IDs: $gpu_ids"
+    local python_script=$(ls llm-miner.py | head -n 1)
     if [[ -n "$python_script" ]]; then
-        python "$python_script" "$hf_model_id" "$quantization" "$heurist_model_id" $gpu_memory_util "$revision" "$miner_id_index" "$port" "$gpu_ids" "$skip_signature"
+        python "$python_script" "$hf_model_id" "$quantization" "$heurist_model_id" $gpu_memory_util "$revision" "$miner_id_index" "$port" "$gpu_ids" "$skip_signature" "$tool_call_parser"
         log_info "Python script executed successfully."
     else
-        log_error "No Python script matching 'llm-miner-*.py' found."
+        log_error "No Python script matching 'llm-miner.py' found."
         exit 1
     fi
 
